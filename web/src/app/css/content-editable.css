@@ -80,3 +80,24 @@
   background: var(--background-neutral-02);
   color: var(--text-05);
 }
+
+/* Skill tile — a blue accent fill (not gray) with a border that is just a
+   darker shade of the same fill, so slash-command skills read distinctly from
+   plain paste tiles. */
+.rich-input-tile[data-tile-type="skill"] {
+  background: var(--action-link-01);
+  border-color: var(--action-link-02);
+}
+
+.rich-input-tile[data-tile-type="skill"]:hover {
+  background: var(--action-link-02);
+  border-color: var(--action-link-03);
+}
+
+.rich-input-tile[data-tile-type="skill"] .rich-input-tile-icon {
+  color: var(--action-link-04);
+}
+
+.rich-input-tile[data-tile-type="skill"] .rich-input-tile-preview {
+  color: var(--text-05);
+}

@@ -7,6 +7,7 @@ import {
   shouldCreatePasteTile,
   getPasteTilePreview,
   getPasteTileMeta,
+  createRichInputTileNode,
   PASTE_TILE_THRESHOLD_CHARS,
 } from "@/lib/richInputTile";
 
@@ -176,5 +177,52 @@ describe("getTextContent", () => {
     el.appendChild(p2);
     el.appendChild(p3);
     expect(getTextContent(el)).toBe("line1\nline2\nline3");
+  });
+});
+
+describe("createRichInputTileNode — skill tiles", () => {
+  // Skill tiles are built with a "Skill: <name>" preview and an empty meta.
+  it("marks the tile type and stores the skill slug", () => {
+    const tile = createRichInputTileNode({
+      type: "skill",
+      text: "/pptx ",
+      preview: "Skill: Slides",
+      meta: "",
+      skillSlug: "pptx",
+    });
+    expect(tile.getAttribute("data-tile-type")).toBe("skill");
+    expect(tile.getAttribute("data-skill-slug")).toBe("pptx");
+  });
+
+  it("serializes to the legacy `/<slug> ` literal via getTextContent", () => {
+    // This is the contract that keeps the submitted payload identical to the
+    // pre-tile behavior, so the backend needs no changes.
+    const el = document.createElement("div");
+    el.appendChild(document.createTextNode("make me "));
+    el.appendChild(
+      createRichInputTileNode({
+        type: "skill",
+        text: "/pptx ",
+        preview: "Skill: Slides",
+        meta: "",
+        skillSlug: "pptx",
+      })
+    );
+    el.appendChild(document.createTextNode("about cats"));
+    expect(getTextContent(el)).toBe("make me /pptx about cats");
+  });
+
+  it("renders the 'Skill: <name>' preview and omits the meta when empty", () => {
+    const tile = createRichInputTileNode({
+      type: "skill",
+      text: "/pptx ",
+      preview: "Skill: Slides",
+      meta: "",
+      skillSlug: "pptx",
+    });
+    expect(tile.querySelector(".rich-input-tile-preview")?.textContent).toBe(
+      "Skill: Slides"
+    );
+    expect(tile.querySelector(".rich-input-tile-meta")).toBeNull();
   });
 });

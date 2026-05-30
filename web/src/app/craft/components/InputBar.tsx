@@ -11,12 +11,14 @@ import {
   type ChangeEvent,
   type ClipboardEvent,
   type KeyboardEvent,
+  type MouseEvent,
   type SyntheticEvent,
 } from "react";
 import { getPastedFilesIfNoText } from "@/lib/clipboard";
 import { isImageFile } from "@/lib/utils";
 import PasteTilePopover from "@/sections/input/PasteTilePopover";
 import SkillPickerPopover from "@/sections/input/SkillPickerPopover";
+import SkillInfoPopover from "@/sections/input/SkillInfoPopover";
 import { cn } from "@opal/utils";
 import { Disabled } from "@opal/core";
 import {
@@ -37,7 +39,6 @@ import {
   SvgAlertCircle,
 } from "@opal/icons";
 import { useContentEditable } from "@/hooks/useContentEditable";
-import { useUser } from "@/providers/UserProvider";
 import useUserSkills from "@/hooks/useUserSkills";
 import { detectSlashTrigger, toPickerSkills } from "@/lib/skills/picker";
 import { getTextContent } from "@/lib/contentEditable";
@@ -172,7 +173,6 @@ const InputBar = memo(
       // Queueing is enabled only when the parent wires up the callbacks.
       const queueEnabled = !!onQueueMessage;
       const queue = queuedMessages ?? EMPTY_QUEUED_MESSAGES;
-      const { user } = useUser();
       const inputWrapperRef = useRef<HTMLDivElement>(null);
       const {
         ref: inputRef,
@@ -183,6 +183,7 @@ const InputBar = memo(
         handleCompositionStart,
         handleCompositionEnd,
         pasteText,
+        insertSkillTile,
         handleCopy,
         handleCut,
         setCursorToEnd,
@@ -194,7 +195,9 @@ const InputBar = memo(
         updateTileText,
       } = useContentEditable({
         wrapperRef: inputWrapperRef,
-        pasteTilesEnabled: user?.preferences?.paste_as_tile ?? false,
+        // Craft always collapses large pastes into tiles, regardless of the
+        // user's paste_as_tile preference.
+        pasteTilesEnabled: true,
       });
 
       const containerRef = useRef<HTMLDivElement>(null);
@@ -208,9 +211,6 @@ const InputBar = memo(
         hasUploadingFiles,
       } = useUploadFilesContext();
 
-      // `/` skill picker state. The picker watches contentEditable input,
-      // shows accessible skills, and on select replaces the `/<query>` token
-      // with `/<slug> `.
       const { data: skillsData } = useUserSkills();
       const pickerSkills = useMemo(
         () => toPickerSkills(skillsData),
@@ -220,8 +220,13 @@ const InputBar = memo(
         open: boolean;
         anchorRect: DOMRect | null;
         query: string;
-        slashIndex: number;
-      }>({ open: false, anchorRect: null, query: "", slashIndex: -1 });
+      }>({ open: false, anchorRect: null, query: "" });
+
+      const [skillInfo, setSkillInfo] = useState<{
+        tile: HTMLElement;
+        name: string;
+        description: string;
+      } | null>(null);
 
       // Shared queued-message keyboard navigation + highlight state.
       const queueNav = useQueuedMessageNavigation({
@@ -241,6 +246,21 @@ const InputBar = memo(
         const cloned = range.cloneRange();
         cloned.selectNodeContents(el);
         cloned.setEnd(range.startContainer, range.startOffset);
+        const tmp = document.createElement("div");
+        tmp.appendChild(cloned.cloneContents());
+        return getTextContent(tmp);
+      }, [inputRef]);
+
+      const getTextAfterCursor = useCallback((): string | null => {
+        const el = inputRef.current;
+        if (!el) return null;
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return null;
+        const range = sel.getRangeAt(0);
+        if (!el.contains(range.endContainer)) return null;
+        const cloned = range.cloneRange();
+        cloned.selectNodeContents(el);
+        cloned.setStart(range.endContainer, range.endOffset);
         const tmp = document.createElement("div");
         tmp.appendChild(cloned.cloneContents());
         return getTextContent(tmp);
@@ -278,7 +298,6 @@ const InputBar = memo(
           open: true,
           anchorRect: getCaretRect(),
           query: trigger.query,
-          slashIndex: trigger.slashIndex,
         });
       }, [getCaretRect, getTextBeforeCursor]);
 
@@ -290,10 +309,7 @@ const InputBar = memo(
         [onInput, evaluateSkillPicker]
       );
 
-      // Re-evaluate the slash trigger when the caret moves without input
-      // (arrow keys, Home/End, mouse clicks). Without this, the picker can
-      // hold a stale `slashIndex`/`query` from a previous position and
-      // replace the wrong text on select.
+      // Re-evaluate the trigger when the caret moves without input (arrows/click).
       const handleSelectionChange = useCallback(() => {
         evaluateSkillPicker();
       }, [evaluateSkillPicker]);
@@ -304,18 +320,47 @@ const InputBar = memo(
 
       const handleSkillPickerSelect = useCallback(
         (slug: string) => {
-          setSkillPicker((prev) => {
-            if (!prev.open) return prev;
-            const replacement = `/${slug} `;
-            const newText =
-              message.slice(0, prev.slashIndex) +
-              replacement +
-              message.slice(prev.slashIndex + 1 + prev.query.length);
-            setMessage(newText);
-            return { ...prev, open: false };
-          });
+          if (!skillPicker.open) return;
+          // `beforeToken` is `/<query>`; `afterText` is the token remainder past
+          // the caret (when clicking mid-token).
+          const beforeToken = `/${skillPicker.query}`;
+          const afterText = getTextAfterCursor()?.match(/^\S*/)?.[0] ?? "";
+          const name = pickerSkills.find((s) => s.slug === slug)?.name ?? slug;
+          insertSkillTile(slug, name, beforeToken, afterText);
+          closeSkillPicker();
         },
-        [message, setMessage]
+        [
+          skillPicker,
+          pickerSkills,
+          insertSkillTile,
+          closeSkillPicker,
+          getTextAfterCursor,
+        ]
+      );
+
+      // Clicking a skill tile opens an info popover with its name + description.
+      // Other clicks fall through to the paste-tile handler.
+      const handleInputClick = useCallback(
+        (event: MouseEvent<HTMLDivElement>) => {
+          const target = event.target as HTMLElement;
+          const tile = target.closest("[data-rich-tile]") as HTMLElement | null;
+          if (
+            tile &&
+            tile.getAttribute("data-tile-type") === "skill" &&
+            !target.closest("[data-rich-tile-remove]")
+          ) {
+            const slug = tile.getAttribute("data-skill-slug") ?? "";
+            const skill = pickerSkills.find((s) => s.slug === slug);
+            setSkillInfo({
+              tile,
+              name: skill?.name ?? slug,
+              description: skill?.description ?? "",
+            });
+            return;
+          }
+          handleTileClick(event);
+        },
+        [pickerSkills, handleTileClick]
       );
 
       useImperativeHandle(ref, () => ({
@@ -365,6 +410,7 @@ const InputBar = memo(
       const handleSubmit = useCallback(() => {
         // File uploads / sandbox init are hard blockers regardless of queueing.
         if (disabled || hasUploadingFiles || sandboxInitializing) return;
+        setSkillInfo(null);
 
         const text = message.trim();
 
@@ -511,7 +557,7 @@ const InputBar = memo(
                 onCopy={handleCopy}
                 onCut={handleCut}
                 onMouseDown={handleTileMouseDown}
-                onClick={handleTileClick}
+                onClick={handleInputClick}
               />
             </div>
 
@@ -563,6 +609,14 @@ const InputBar = memo(
             onSelect={handleSkillPickerSelect}
             onClose={closeSkillPicker}
           />
+          {skillInfo && (
+            <SkillInfoPopover
+              name={skillInfo.name}
+              description={skillInfo.description}
+              tileElement={skillInfo.tile}
+              onDismiss={() => setSkillInfo(null)}
+            />
+          )}
         </Disabled>
       );
     }

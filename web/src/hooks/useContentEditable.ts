@@ -35,6 +35,17 @@ export interface UseContentEditableReturn {
   handleCompositionEnd: () => void;
   insertTextAtCursor: (text: string) => void;
   insertTileAtCursor: (text: string) => void;
+  /**
+   * Insert a skill tile, removing the slash token around the caret: `beforeToken`
+   * (the `/<query>` before the caret) and `afterText` (any remaining token
+   * characters after the caret).
+   */
+  insertSkillTile: (
+    slug: string,
+    name: string,
+    beforeToken: string,
+    afterText: string
+  ) => void;
   pasteText: (text: string) => void;
   handleCopy: (event: React.ClipboardEvent<HTMLDivElement>) => void;
   handleCut: (event: React.ClipboardEvent<HTMLDivElement>) => void;
@@ -259,6 +270,115 @@ export function useContentEditable({
     [syncFromDOM, resize]
   );
 
+  // Delete `token` immediately before the cursor, but only after verifying the
+  // chars to remove equal it (else bail + restore caret). Returns success.
+  const deleteTokenBeforeCursor = useCallback((token: string): boolean => {
+    const el = ref.current;
+    const n = token.length;
+    if (!el || n <= 0) return false;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed || !el.contains(range.startContainer)) return false;
+
+    const { startContainer, startOffset } = range;
+
+    // Fast path: the token lives entirely within the caret's text node.
+    if (
+      startContainer.nodeType === Node.TEXT_NODE &&
+      startOffset >= n &&
+      startContainer.textContent?.slice(startOffset - n, startOffset) === token
+    ) {
+      range.setStart(startContainer, startOffset - n);
+      range.deleteContents();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return true;
+    }
+
+    // Fallback for node-spanning tokens; modify is absent in jsdom.
+    if (typeof sel.modify !== "function") return false;
+    const steps = Array.from(token).length; // code points, not UTF-16 units
+    for (let i = 0; i < steps; i++) {
+      sel.modify("extend", "backward", "character");
+    }
+    if (sel.toString() === token) {
+      sel.deleteFromDocument();
+      return true;
+    }
+    const restored = document.createRange();
+    restored.setStart(startContainer, startOffset);
+    restored.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(restored);
+    return false;
+  }, []);
+
+  // Forward counterpart of deleteTokenBeforeCursor: delete `text` after the
+  // cursor, verified so it can't eat into a following tile.
+  const deleteTextAfterCursor = useCallback((text: string): boolean => {
+    const el = ref.current;
+    const n = text.length;
+    if (!el || n <= 0) return false;
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    if (!range.collapsed || !el.contains(range.startContainer)) return false;
+
+    const { startContainer, startOffset } = range;
+
+    // Fast path: the text lives entirely within the caret's text node.
+    if (
+      startContainer.nodeType === Node.TEXT_NODE &&
+      startOffset + n <= (startContainer.textContent?.length ?? 0) &&
+      startContainer.textContent?.slice(startOffset, startOffset + n) === text
+    ) {
+      range.setEnd(startContainer, startOffset + n);
+      range.deleteContents();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return true;
+    }
+
+    if (typeof sel.modify !== "function") return false;
+    const steps = Array.from(text).length;
+    for (let i = 0; i < steps; i++) {
+      sel.modify("extend", "forward", "character");
+    }
+    if (sel.toString() === text) {
+      sel.deleteFromDocument();
+      return true;
+    }
+    const restored = document.createRange();
+    restored.setStart(startContainer, startOffset);
+    restored.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(restored);
+    return false;
+  }, []);
+
+  const insertSkillTile = useCallback(
+    (slug: string, name: string, beforeToken: string, afterText: string) => {
+      if (!ref.current) return;
+      // Bail if the `/<query>` can't be removed — the tile serializes back to
+      // `/<slug> `, so inserting over a surviving `/<query>` would duplicate it.
+      if (!deleteTokenBeforeCursor(beforeToken)) return;
+      deleteTextAfterCursor(afterText);
+      const tile = createRichInputTileNode({
+        type: "skill",
+        text: `/${slug} `,
+        preview: `Skill: ${name}`,
+        meta: "",
+        skillSlug: slug,
+      });
+      insertNodeAtCursorUtil(ref.current, tile);
+      setCursorAfterNode(tile);
+      syncFromDOM();
+      resize();
+    },
+    [deleteTextAfterCursor, deleteTokenBeforeCursor, syncFromDOM, resize]
+  );
+
   const pasteText = useCallback(
     (text: string) => {
       if (pasteTilesEnabled && shouldCreatePasteTile(text)) {
@@ -300,6 +420,9 @@ export function useContentEditable({
 
       const tile = target.closest("[data-rich-tile]") as HTMLElement | null;
       if (tile) {
+        // Skill tiles don't use the paste-edit popover; their click handling
+        // (re-pick) lives in the host input bar.
+        if (tile.getAttribute("data-tile-type") === "skill") return;
         const text = tile.getAttribute("data-text") ?? "";
         setTilePopover({ text, tile });
       } else {
@@ -374,10 +497,12 @@ export function useContentEditable({
       const isNav = event.key === "ArrowLeft" || event.key === "ArrowRight";
       const isDelete = event.key === "Backspace" || event.key === "Delete";
 
-      // Enter on selected tile → open popover
+      // Enter on selected tile → open popover (paste tiles only; skill tiles
+      // have no editable text, so Enter is a no-op that keeps them selected).
       if (event.key === "Enter" && selectedTileRef.current) {
         event.preventDefault();
         const tile = selectedTileRef.current;
+        if (tile.getAttribute("data-tile-type") === "skill") return true;
         const text = tile.getAttribute("data-text") ?? "";
         setTilePopover({ text, tile });
         return true;
@@ -530,6 +655,7 @@ export function useContentEditable({
     handleCompositionEnd,
     insertTextAtCursor,
     insertTileAtCursor,
+    insertSkillTile,
     pasteText,
     handleCopy,
     handleCut,
