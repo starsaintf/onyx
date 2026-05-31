@@ -212,22 +212,6 @@ class _ServeMixin:
                 title=f"build-session-{str(session_id)[:8]}",
             )
 
-    def interrupt_turn(
-        self,
-        sandbox_id: UUID,
-        session_id: UUID,
-        opencode_session_id: str,
-    ) -> None:
-        """Interrupt the in-flight turn for a session by POSTing to opencode-serve.
-
-        opencode flips the session to ``session.idle`` in response, which the
-        active ``send_message`` stream translates into a terminating
-        ``PromptResponse`` — so the turn ends through the normal completion
-        path (lock released, partial output persisted)."""
-        session_path = self._session_directory(session_id)
-        with self._build_serve_client(sandbox_id, session_path) as client:
-            client.abort(opencode_session_id, directory=session_path)
-
     def list_subagents(
         self,
         sandbox_id: UUID,
@@ -383,6 +367,7 @@ class _ServeMixin:
         agent_model: str | None,
         *,
         on_opencode_session_resolved: Callable[[str], None] | None = None,
+        should_interrupt: Callable[[], bool] | None = None,
     ) -> Generator[SandboxEvent, None, None]:
         """Stream sandbox events via the in-sandbox ``opencode serve``. Preflight
         ``opencode_session_id`` via :meth:`ensure_opencode_session` to avoid
@@ -433,6 +418,7 @@ class _ServeMixin:
                     directory=session_path,
                     model_provider=agent_provider,
                     model_id=agent_model,
+                    should_interrupt=should_interrupt,
                 ):
                     events_count += 1
                     if isinstance(event, PromptResponse):

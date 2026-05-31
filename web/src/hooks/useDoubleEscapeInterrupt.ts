@@ -43,6 +43,8 @@ export function useDoubleEscapeInterrupt({
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
+      // Ignore auto-repeat: holding Esc must not count as the second press.
+      if (event.repeat) return;
       // A popover already handled Esc (e.g. closed a menu) — leave it alone.
       if (event.defaultPrevented || event.isComposing) return;
 

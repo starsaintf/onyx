@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 import zipfile
+from collections.abc import Callable
 from collections.abc import Generator
 from datetime import datetime
 from datetime import timezone
@@ -1231,40 +1232,18 @@ class SessionManager:
     def interrupt_message(self, session_id: UUID, user_id: UUID) -> bool:
         """Interrupt the in-flight agent turn for a session.
 
-        Sets an interrupt fence the streaming flow honors at the point the
-        opencode session is known and on every event thereafter — this is the
-        source of truth and survives the first-turn race where the opencode
-        session id hasn't been minted yet. When the id is already known we also
-        interrupt opencode-serve directly for an immediate stop. Either way the
-        turn terminates through its normal ``PromptResponse`` path.
-
-        Returns whether a directly-interruptible turn was found (sandbox running
-        with a known opencode session); the fence is set regardless.
+        Sets the interrupt fence and returns. The active stream's consume loop
+        polls the fence (~1/s) and self-terminates — aborting opencode and
+        emitting its own ``PromptResponse`` rather than waiting on a
+        ``session.idle`` that may never arrive after an abort. Setting a flag
+        (vs. a direct abort) is also what survives the first-turn race, where
+        the opencode session id isn't minted until inside the stream.
         """
         session = get_build_session(session_id, user_id, self._db_session)
         if session is None:
             raise OnyxError(OnyxErrorCode.SESSION_NOT_FOUND, "Session not found")
 
         request_interrupt(session_id, get_cache_backend())
-
-        sandbox = get_sandbox_by_user_id(self._db_session, user_id)
-        opencode_session_id = session.opencode_session_id
-        if (
-            sandbox is None
-            or sandbox.status != SandboxStatus.RUNNING
-            or opencode_session_id is None
-        ):
-            return False
-        try:
-            self._sandbox_manager.interrupt_turn(
-                sandbox.id, session_id, opencode_session_id
-            )
-        except Exception:
-            # Best effort — the fence still guarantees the turn is honored.
-            logger.exception(
-                "Direct interrupt failed for session %s; relying on fence",
-                session_id,
-            )
         return True
 
     # ----- Persistence helpers (shared with the headless scheduled-tasks executor) -----
@@ -1414,6 +1393,7 @@ class SessionManager:
         session_id: UUID,
         user_message_content: str,
         opencode_session_id: str | None = None,
+        should_interrupt: Callable[[], bool] | None = None,
     ) -> Generator[Any, None, None]:
         """Drain the CLI agent to completion, yielding raw sandbox events.
 
@@ -1449,6 +1429,7 @@ class SessionManager:
             agent_provider=agent_provider,
             agent_model=agent_model,
             on_opencode_session_resolved=_persist_resolved_id,
+            should_interrupt=should_interrupt,
         )
 
     def _get_session_agent_selection(
@@ -1786,10 +1767,12 @@ class SessionManager:
             # which releases on every exit path.
             prompt_slot_cm = candidate_cm
 
-            # Clear any stale interrupt fence so an interrupt from a prior turn
-            # can't kill this fresh one. Interrupts for THIS turn set it after.
+            # NB: we deliberately do NOT clear the fence here. The finally clears
+            # it before releasing the slot, so a prior turn's fence can never
+            # leak to this one. Clearing at turn start instead would wipe an
+            # interrupt that landed while we were blocked acquiring the slot —
+            # losing the very first-turn interrupt this feature must honor.
             cache = get_cache_backend()
-            clear_interrupt(session_id, cache)
 
             def interrupt_requested() -> bool:
                 # A cache blip must never fail a healthy turn — fail open.
@@ -1877,36 +1860,23 @@ class SessionManager:
             # Drive the agent. sandbox events are merged with proxy approval
             # announces onto one SSE stream. `_persist_sandbox_event` applies
             # persistence; SSE formatting + packet-logger book-keeping happen here.
+            # `should_interrupt` lets the consume loop self-terminate on the
+            # fence (abort + its own PromptResponse) within ~1s, even on an
+            # event-less turn — so an interrupt never depends on opencode
+            # emitting session.idle, which can leave the turn (and its slot)
+            # hung until the wall-clock timeout.
             merged_events = self._merge_events_with_announces(
                 self._yield_sandbox_events(
                     sandbox_id,
                     session_id,
                     user_message_content,
                     opencode_session_id=opencode_session_id,
+                    should_interrupt=interrupt_requested,
                 ),
                 session_id=session_id,
                 tenant_id=get_current_tenant_id(),
             )
-            turn_interrupted = False
-            # Poll the fence at most once a second rather than per event — a
-            # chatty agent emits far faster than an interrupt needs honoring.
-            last_interrupt_check = 0.0
             for sandbox_event in merged_events:
-                now = time.monotonic()
-                if (
-                    not turn_interrupted
-                    and opencode_session_id is not None
-                    and now - last_interrupt_check >= 1.0
-                ):
-                    last_interrupt_check = now
-                    if interrupt_requested():
-                        # Interrupt opencode once; the resulting session.idle ->
-                        # PromptResponse ends this loop naturally.
-                        turn_interrupted = True
-                        self._sandbox_manager.interrupt_turn(
-                            sandbox_id, session_id, opencode_session_id
-                        )
-
                 if isinstance(sandbox_event, ApprovalRequestedPacket):
                     packet_logger.log(
                         "approval_requested",

@@ -372,8 +372,16 @@ const InputBar = memo(
       );
 
       const handleSubmit = useCallback(() => {
-        // File uploads / sandbox init are hard blockers regardless of queueing.
-        if (disabled || hasUploadingFiles || sandboxInitializing) return;
+        // File uploads / sandbox init / a pending interrupt are hard blockers
+        // regardless of queueing — keep this in sync with `canSubmit` so the
+        // keyboard (Enter) path can't bypass what the button disables.
+        if (
+          disabled ||
+          hasUploadingFiles ||
+          sandboxInitializing ||
+          isInterrupting
+        )
+          return;
 
         const text = message.trim();
 
@@ -398,6 +406,7 @@ const InputBar = memo(
         message,
         disabled,
         isRunning,
+        isInterrupting,
         hasUploadingFiles,
         sandboxInitializing,
         onSubmit,
