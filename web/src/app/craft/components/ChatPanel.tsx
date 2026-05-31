@@ -8,6 +8,7 @@ import {
   useSessionId,
   useHasSession,
   useIsRunning,
+  useIsInterrupting,
   useOutputPanelOpen,
   useToggleOutputPanel,
   useBuildSessionStore,
@@ -110,7 +111,8 @@ export default function BuildChatPanel({
   const nameBuildSession = useBuildSessionStore(
     (state) => state.nameBuildSession
   );
-  const { streamMessage } = useBuildStreaming();
+  const { streamMessage, interruptStreaming } = useBuildStreaming();
+  const isInterrupting = useIsInterrupting();
   const queuedMessages = useQueuedMessages();
   const enqueueMessage = useBuildSessionStore((state) => state.enqueueMessage);
   const removeQueuedMessage = useBuildSessionStore(
@@ -345,6 +347,10 @@ export default function BuildChatPanel({
     ]
   );
 
+  const handleInterrupt = useCallback(() => {
+    if (sessionId) void interruptStreaming(sessionId);
+  }, [sessionId, interruptStreaming]);
+
   const handleQueueMessage = useCallback(
     (text: string) => {
       if (sessionId) enqueueMessage(sessionId, text);
@@ -511,6 +517,8 @@ export default function BuildChatPanel({
                 ref={inputBarRef}
                 onSubmit={handleSubmit}
                 isRunning={isRunning}
+                isInterrupting={isInterrupting}
+                onInterrupt={handleInterrupt}
                 placeholder="Continue the conversation..."
                 queuedMessages={queuedMessages}
                 onQueueMessage={handleQueueMessage}

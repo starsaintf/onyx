@@ -32,10 +32,13 @@ import {
   SvgFileText,
   SvgImage,
   SvgLoader,
+  SvgStop,
   SvgX,
   SvgPaperclip,
   SvgAlertCircle,
 } from "@opal/icons";
+import InterruptHint from "@/app/craft/components/InterruptHint";
+import { useDoubleEscapeInterrupt } from "@/hooks/useDoubleEscapeInterrupt";
 import { useContentEditable } from "@/hooks/useContentEditable";
 import { useUser } from "@/providers/UserProvider";
 import useUserSkills from "@/hooks/useUserSkills";
@@ -66,6 +69,10 @@ export interface InputBarProps {
   queuedMessages?: readonly QueuedMessage[];
   onQueueMessage?: (text: string) => void;
   onRemoveQueuedMessage?: (index: number) => void;
+  /** Interrupt the in-flight turn; when wired, shows the Stop control + Esc hint. */
+  onInterrupt?: () => void;
+  /** Interrupt requested, awaiting the turn to terminate. */
+  isInterrupting?: boolean;
 }
 
 /**
@@ -166,6 +173,8 @@ const InputBar = memo(
         queuedMessages,
         onQueueMessage,
         onRemoveQueuedMessage,
+        onInterrupt,
+        isInterrupting = false,
       },
       ref
     ) => {
@@ -422,7 +431,20 @@ const InputBar = memo(
         !disabled &&
         !hasUploadingFiles &&
         !sandboxInitializing &&
+        !isInterrupting &&
         (!isRunning || (queueEnabled && queue.length < MAX_QUEUED_MESSAGES));
+
+      // The Stop control + double-Esc shortcut are live only while a turn is
+      // streaming and no popover is claiming Esc for itself.
+      const interruptible = !!onInterrupt && isRunning;
+      const handleInterrupt = useCallback(() => {
+        if (interruptible && !isInterrupting) onInterrupt?.();
+      }, [interruptible, isInterrupting, onInterrupt]);
+      const { armed } = useDoubleEscapeInterrupt({
+        enabled:
+          interruptible && !isInterrupting && !skillPicker.open && !tilePopover,
+        onInterrupt: handleInterrupt,
+      });
 
       return (
         <Disabled disabled={disabled}>
@@ -518,7 +540,7 @@ const InputBar = memo(
             {/* Bottom controls */}
             <div className="flex justify-between items-center w-full p-1 min-h-[40px]">
               {/* Bottom left controls */}
-              <div className="flex flex-row items-center gap-1">
+              <div className="flex flex-row items-center gap-2">
                 {/* (+) button for file upload */}
                 <Button
                   disabled={disabled}
@@ -527,19 +549,60 @@ const InputBar = memo(
                   prominence="tertiary"
                   onClick={() => fileInputRef.current?.click()}
                 />
+                {/* Streaming-only: teaches the double-Esc interrupt. */}
+                {interruptible && (
+                  <InterruptHint armed={armed} interrupting={isInterrupting} />
+                )}
               </div>
 
               {/* Bottom right controls */}
               <div className="flex flex-row items-center gap-1">
-                {/* Submit button */}
+                {/* Stop: inserts to the LEFT of the fixed send button while
+                    streaming, so the send target never shifts. The IconButton
+                    variant is structural only — the soft-red surface comes from
+                    the className tokens (no "danger secondary" hover-tint look). */}
+                <div
+                  className={cn(
+                    "overflow-hidden transition-[width,opacity] duration-150 ease-out motion-reduce:transition-none",
+                    interruptible
+                      ? "w-8 opacity-100"
+                      : "w-0 opacity-0 pointer-events-none"
+                  )}
+                >
+                  <IconButton
+                    main
+                    secondary
+                    icon={isInterrupting ? SvgLoader : SvgStop}
+                    iconClassName={cn(
+                      isInterrupting
+                        ? "animate-spin"
+                        : "stroke-action-danger-05!"
+                    )}
+                    className={cn(
+                      armed
+                        ? "bg-action-danger-03! hover:bg-action-danger-03!"
+                        : "bg-action-danger-01! hover:bg-action-danger-02!"
+                    )}
+                    disabled={!interruptible || isInterrupting}
+                    onClick={handleInterrupt}
+                    tooltip="Stop · esc esc"
+                    aria-label="Stop generating"
+                  />
+                </div>
+                {/* Submit button — fixed rightmost in every state. */}
                 {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
                 <IconButton
                   icon={sandboxInitializing ? SvgLoader : SvgArrowUp}
                   onClick={handleSubmit}
                   disabled={!canSubmit}
                   tooltip={
-                    sandboxInitializing ? "Initializing sandbox..." : "Send"
+                    sandboxInitializing
+                      ? "Initializing sandbox..."
+                      : isRunning
+                        ? "Queue message"
+                        : "Send"
                   }
+                  aria-label={isRunning ? "Queue message" : "Send"}
                   iconClassName={
                     sandboxInitializing ? "animate-spin" : undefined
                   }
