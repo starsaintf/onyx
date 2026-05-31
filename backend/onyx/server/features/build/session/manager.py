@@ -2073,7 +2073,17 @@ class SessionManager:
             # Clear the fence BEFORE releasing the slot: while we still hold it
             # no next turn can start, so we can't clobber a fence legitimately
             # set for that turn. Don't let a fence outlive its turn either.
-            clear_interrupt(session_id, get_cache_backend())
+            # Guard the cache call — a raise here would skip the slot release
+            # below and leak the lock for the rest of the process's life.
+            try:
+                clear_interrupt(session_id, get_cache_backend())
+            except CACHE_TRANSIENT_ERRORS:
+                logger.warning(
+                    "[SANDBOX-SERVE] failed to clear interrupt fence for "
+                    "session %s; releasing slot anyway",
+                    session_id,
+                    exc_info=True,
+                )
             if prompt_slot_cm is not None:
                 prompt_slot_cm.__exit__(None, None, None)
 
